@@ -1,0 +1,289 @@
+version: '3.8'
+
+services:
+  # Main API Server
+  data-protection-api:
+    build: .
+    container_name: data-protection-api
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=data_protection
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres123
+      - KAFKA_BROKERS=kafka:9092
+    depends_on:
+      - redis
+      - postgres
+      - kafka
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # Redis for high-performance caching
+  redis:
+    image: redis:7-alpine
+    container_name: data-protection-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # PostgreSQL for license metadata storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: data-protection-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=data_protection
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres123
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # Apache Kafka for real-time event streaming
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: data-protection-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    networks:
+      - data-protection-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: data-protection-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # Compliance Monitor Service
+  compliance-monitor:
+    build: .
+    container_name: data-protection-monitor
+    command: node src/monitoring/compliance-monitor.js
+    environment:
+      - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=data_protection
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres123
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - postgres
+      - kafka
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: data-protection-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # Grafana for metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: data-protection-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # Nginx reverse proxy and load balancer
+  nginx:
+    image: nginx:alpine
+    container_name: data-protection-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - ./nginx/logs:/var/log/nginx
+    depends_on:
+      - data-protection-api
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+  # Redis Cluster for high availability (optional)
+  redis-cluster:
+    image: redis:7-alpine
+    container_name: data-protection-redis-cluster
+    ports:
+      - "7000-7005:7000-7005"
+    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --appendonly yes
+    volumes:
+      - redis-cluster-data:/data
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+    profiles:
+      - cluster
+
+  # Elasticsearch for log aggregation (optional)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.0
+    container_name: data-protection-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+    profiles:
+      - logging
+
+  # Kibana for log visualization (optional)
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.10.0
+    container_name: data-protection-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+    profiles:
+      - logging
+
+  # Health check service
+  healthcheck:
+    build: .
+    container_name: data-protection-healthcheck
+    command: node scripts/healthcheck.js
+    environment:
+      - API_URL=http://data-protection-api:3000
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://postgres:postgres123@postgres:5432/data_protection
+      - KAFKA_URL=kafka:9092
+    depends_on:
+      - data-protection-api
+      - redis
+      - postgres
+      - kafka
+    restart: unless-stopped
+    networks:
+      - data-protection-network
+
+volumes:
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
+  kafka-data:
+    driver: local
+  zookeeper-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  redis-cluster-data:
+    driver: local
+  elasticsearch-data:
+    driver: local
+
+networks:
+  data-protection-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Production deployment with docker-compose
+# 
+# Quick start:
+# docker-compose up -d
+#
+# With clustering:
+# docker-compose --profile cluster up -d
+#
+# With logging:
+# docker-compose --profile logging up -d
+#
+# All services:
+# docker-compose --profile cluster --profile logging up -d
+#
+# Scale API servers:
+# docker-compose up -d --scale data-protection-api=3
+#
+# View logs:
+# docker-compose logs -f data-protection-api
+#
+# Stop all services:
+# docker-compose down
+#
+# Remove all data:
+# docker-compose down -v
