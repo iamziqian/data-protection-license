@@ -100,4 +100,4 @@ This platform addresses the critical gap in AI data governance where traditional
 
 ---
 
-*Built during tenure as Software Engineer (12/2022 - 08/2023)*
+*Built during tenure as Software Engineer (04/2023 - 12/2023)*
